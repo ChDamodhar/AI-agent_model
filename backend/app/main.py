@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import data
 from .routes.pipeline import router as pipeline_router
+from .routes.agents import router as agents_router
 from .database import init_db
 app = FastAPI(
     title="DataMind AI API",
@@ -21,6 +22,7 @@ app.add_middleware(
 # Include API routers
 app.include_router(data.router, prefix="/api/v1")
 app.include_router(pipeline_router, prefix="/api/v1")
+app.include_router(agents_router, prefix="/api/v1")
 
 @app.on_event("startup")
 def startup_event():

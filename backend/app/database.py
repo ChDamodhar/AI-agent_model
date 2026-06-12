@@ -45,6 +45,7 @@ class PipelineRun(Base):
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
     meta_json = Column(JSON, nullable=True)
+    dataset = relationship("Dataset", backref="pipeline_runs", primaryjoin="PipelineRun.file_id == Dataset.file_id")
 
 # Report model – stores generated analysis reports (PDF, PPTX, etc.)
 class Report(Base):
@@ -80,11 +81,6 @@ class ChatMessage(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     user = relationship("User", backref="chat_messages")
     dataset = relationship("Dataset", backref="chat_messages")
-
-
-    # Relationship to Dataset (optional)
-    dataset = relationship("Dataset", backref="pipeline_runs")
-
 
 def init_db():
     """Create tables if they don't exist."""

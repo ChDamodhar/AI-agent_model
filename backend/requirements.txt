@@ -36,3 +36,5 @@ sentence-transformers
 
 
 SQLAlchemy>=2.0.0
+langchain
+langchain-ollama

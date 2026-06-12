@@ -1,6 +1,7 @@
 import os
 import uuid
 import pandas as pd
+import math
 from typing import Dict, Any, Tuple
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,6 +11,22 @@ REPORT_DIR = os.path.join(BASE_DIR, "reports")
 # Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORT_DIR, exist_ok=True)
+
+def replace_nan_values(obj):
+    """
+    Recursively replaces NaN and inf values with None in dictionaries and lists.
+    This makes the data JSON-serializable.
+    """
+    if isinstance(obj, dict):
+        return {k: replace_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    else:
+        return obj
 
 def save_upload_file(file_content: bytes, filename: str) -> Tuple[str, str]:
     """
@@ -42,6 +59,8 @@ def get_csv_metadata(file_path: str) -> Dict[str, Any]:
         
         # Get head for preview
         preview = df_full.head(5).to_dict(orient="records")
+        # Replace NaN values with None for JSON serialization
+        preview = replace_nan_values(preview)
         
         return {
             "num_rows": shape[0],

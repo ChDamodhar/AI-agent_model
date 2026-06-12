@@ -113,6 +113,12 @@ class HyperparameterTuningAgent:
         # -----------------------------------------------------------------
         X = df.drop(columns=[target_column])
         y = df[target_column]
+
+        if problem_type == "classification":
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
+
         X_train, X_valid, y_train, y_valid = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y if problem_type == "classification" else None
         )
@@ -121,26 +127,56 @@ class HyperparameterTuningAgent:
         # with new hyper‑parameters.
         original_model = _load_model(model_path)
         model_class = type(original_model)
+        model_name = model_class.__name__
         model_init_kwargs = original_model.get_params()
 
         metric_fn = _infer_metric(problem_type)
+
+        # Check if the model is tree-based and tunable.
+        is_tree = any(term in model_name for term in ["Forest", "GradientBoosting", "XGB", "LGBM", "CatBoost", "ExtraTrees", "DecisionTree"])
+        
+        if not is_tree:
+            # Evaluate baseline score
+            preds = original_model.predict(X_valid)
+            baseline_score = float(metric_fn(y_valid, preds))
+            
+            tuning_report = {
+                "tunable": False,
+                "model_name": model_name,
+                "baseline_metric": baseline_score,
+                "tuned_metric": baseline_score,
+                "best_score": baseline_score,
+                "best_params": {},
+                "n_trials": 0,
+                "problem_type": problem_type,
+            }
+            return original_model, {}, tuning_report
+
+        # Calculate baseline score before tuning
+        preds_baseline = original_model.predict(X_valid)
+        baseline_score = float(metric_fn(y_valid, preds_baseline))
 
         # -----------------------------------------------------------------
         # Optuna objective
         # -----------------------------------------------------------------
         def objective(trial: optuna.trial.Trial) -> float:
-            # Define a small search space that works for most tree‑based models.
-            # ``n_estimators`` and ``max_depth`` are common; for gradient‑boosting we also
-            # expose ``learning_rate``.
-            params: Dict[str, Any] = {
-                "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-                "max_depth": trial.suggest_int("max_depth", 2, 12),
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            }
+            params = {}
+            if "Forest" in model_name or "ExtraTrees" in model_name:
+                params["n_estimators"] = trial.suggest_int("n_estimators", 50, 300)
+                params["max_depth"] = trial.suggest_int("max_depth", 2, 12)
+            elif "XGB" in model_name or "LGBM" in model_name:
+                params["n_estimators"] = trial.suggest_int("n_estimators", 50, 300)
+                params["max_depth"] = trial.suggest_int("max_depth", 2, 12)
+                params["learning_rate"] = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
+            elif "GradientBoosting" in model_name:  # E.g. HistGradientBoostingClassifier/Regressor
+                params["max_iter"] = trial.suggest_int("max_iter", 50, 300)
+                params["max_depth"] = trial.suggest_int("max_depth", 2, 12)
+                params["learning_rate"] = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
+            else:
+                # Catch-all fallback
+                params["max_depth"] = trial.suggest_int("max_depth", 2, 12)
 
-            # Merge with any mandatory arguments from the original model (e.g.,
-            # ``objective`` for XGBoost). We keep the original kwargs that are not part of
-            # the search space.
+            # Merge with any mandatory arguments from the original model.
             merged_params = {**model_init_kwargs, **params}
 
             # Build a fresh estimator instance.
@@ -148,14 +184,9 @@ class HyperparameterTuningAgent:
             model.fit(X_train, y_train)
 
             preds = model.predict(X_valid)
-            # For classification we may need to convert probabilities to class labels.
-            if problem_type == "classification" and hasattr(model, "predict_proba"):
-                # ``accuracy_score`` works directly on class predictions.
-                pass
             score = metric_fn(y_valid, preds)
-            # Optuna tries to *minimise* the objective, so we return the negative score
-            # for metrics where higher is better.
-            return -score if problem_type == "classification" else -score
+            # We want to maximize the metric (accuracy or R2), so Optuna must minimize negative score.
+            return -score
 
         study = optuna.create_study(direction="minimize")
         study.optimize(objective, n_trials=n_trials)
@@ -168,8 +199,12 @@ class HyperparameterTuningAgent:
         _save_model(tuned_model, model_path)
 
         # Build a tiny report.
-        best_score = -study.best_value
+        best_score = float(-study.best_value)
         tuning_report = {
+            "tunable": True,
+            "model_name": model_name,
+            "baseline_metric": baseline_score,
+            "tuned_metric": best_score,
             "best_score": best_score,
             "best_params": best_params,
             "n_trials": n_trials,

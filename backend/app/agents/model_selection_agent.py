@@ -61,10 +61,15 @@ class ModelSelectionAgent:
         X = df.drop(columns=[target_column])
         y = df[target_column]
 
+        # Convert targets appropriately to avoid training warnings/errors
+        if problem_type == "classification":
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
+
         # Train-Test Split (80/20)
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # Convert targets appropriately to avoid training warnings/errors
         if problem_type == "classification":
             y_train = y_train.astype(int)
             y_test = y_test.astype(int)

@@ -16,6 +16,7 @@ from ..utils.file_handler import (
     get_cleaned_file_path,
     get_engineered_file_path,
     REPORT_DIR,
+    replace_nan_values,
 )
 from ..database import get_db, Dataset
 from ..agents.cleaning_agent import CleaningAgent
@@ -70,7 +71,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     db.add(new_dataset)
     db.commit()
     db.refresh(new_dataset)
-    return {"file_id": file_id, "filename": file.filename, "metadata": metadata}
+    return replace_nan_values({"file_id": file_id, "filename": file.filename, "metadata": metadata})
 
 @router.post("/analyze")
 async def analyze_dataset(request: AnalyzeRequest):
@@ -149,6 +150,9 @@ async def analyze_dataset(request: AnalyzeRequest):
             "model_selection_report": model_report
         }
         
+        # Replace NaN values for JSON serialization
+        result = replace_nan_values(result)
+        
         # Write metadata back
         with open(metadata_path, "w") as f:
             json.dump(result, f, indent=2)
@@ -221,13 +225,13 @@ async def tune_model(request: TuneRequest):
             except Exception:
                 pass
 
-        return {
+        return replace_nan_values({
             "message": "Hyperparameter tuning completed successfully.",
             "file_id": request.file_id,
             "target_column": target_column,
             "problem_type": problem_type,
             "tuning_report": tuning_report
-        }
+        })
         
     except HTTPException as he:
         raise he
@@ -294,12 +298,12 @@ async def explain_model(request: ExplainRequest):
             except Exception:
                 pass
 
-        return {
+        return replace_nan_values({
             "message": "Model explanation completed successfully.",
             "file_id": request.file_id,
             "target_column": target_column,
             "explanation_report": explanation_report
-        }
+        })
         
     except HTTPException as he:
         raise he
@@ -340,7 +344,10 @@ async def chat_endpoint(req: ChatRequest):
         # Load metadata JSON for the given file_id
         metadata_path = os.path.join(REPORT_DIR, f"{req.file_id}_metadata.json")
         if not os.path.exists(metadata_path):
-            raise HTTPException(status_code=404, detail="Metadata for given file_id not found.")
+            return ChatResponse(
+                answer="I couldn't find the analysis metadata for this dataset. Please run the Model Selection or the full ML Pipeline first so I can analyze your results and help you!",
+                sources=[]
+            )
         with open(metadata_path, "r") as f:
             report_data = json.load(f)
         result = agent.answer_question(report_data, req.message, top_k=req.top_k)
@@ -358,13 +365,15 @@ async def chat_endpoint(req: ChatRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/insight")
 async def generate_insight(request: InsightRequest):
     """Generate business insights using the BusinessInsightAgent."""
     metadata_path = os.path.join(REPORT_DIR, f"{request.file_id}_metadata.json")
     if not os.path.exists(metadata_path):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis metadata for file ID {request.file_id} not found. Run analysis first."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Analysis metadata for file ID {request.file_id} not found. Please run model selection or the full analysis pipeline first."
         )
     try:
         with open(metadata_path, "r") as f:
@@ -377,12 +386,65 @@ async def generate_insight(request: InsightRequest):
         report_data["business_insights"] = insights_list
         with open(metadata_path, "w") as f:
             json.dump(report_data, f, indent=2)
-        return {"message": "Business insights generated.", "file_id": request.file_id, "insights": insights_list}
+        return replace_nan_values({"message": "Business insights generated.", "file_id": request.file_id, "insights": insights_list})
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An error occurred while generating business insights: {str(e)}"
         )
+
+@router.get("/plot/{file_id}/{plot_name}")
+async def get_plot(file_id: str, plot_name: str):
+    """Serve a generated EDA plot image safely."""
+    if ".." in plot_name or "/" in plot_name or "\\" in plot_name:
+        raise HTTPException(status_code=400, detail="Invalid plot name.")
+    
+    # Try multiple naming conventions (with or without file_id prefix)
+    possible_paths = [
+        os.path.join(REPORT_DIR, f"{file_id}_{plot_name}"),
+        os.path.join(REPORT_DIR, plot_name)
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return FileResponse(path, media_type="image/png")
+            
+    raise HTTPException(status_code=404, detail="Plot image not found.")
+
+@router.get("/preview/{file_id}")
+async def get_dataset_preview(file_id: str):
+    """Return a preview (first 10 rows) of the dataset (raw or cleaned)."""
+    try:
+        file_path = get_file_path(file_id)
+    except FileNotFoundError:
+        try:
+            file_path = get_cleaned_file_path(file_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Dataset file not found.")
+
+    try:
+        df = pd.read_csv(file_path, nrows=10)
+        columns = list(df.columns)
+        rows = json.loads(df.to_json(orient="records"))
+        return {
+            "columns": columns,
+            "rows": rows
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read dataset preview: {str(e)}")
+
+@router.get("/metadata/{file_id}")
+async def get_metadata(file_id: str):
+    """Retrieve metadata JSON for the given file_id."""
+    metadata_path = os.path.join(REPORT_DIR, f"{file_id}_metadata.json")
+    if not os.path.exists(metadata_path):
+        return {}
+    try:
+        with open(metadata_path, "r") as f:
+            data = json.load(f)
+        return replace_nan_values(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {str(e)}")
 
 @router.get("/report/{report_id}")
 async def get_report(report_id: str):

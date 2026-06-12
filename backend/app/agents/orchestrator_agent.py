@@ -22,6 +22,7 @@ class PipelineState(BaseModel):
     """LangGraph state model for the pipeline execution."""
 
     file_id: str
+    job_id: Optional[str] = None
     target_column: Optional[str] = None
     report_dir: str = "./reports"
     raw_path: Optional[str] = None
@@ -65,6 +66,7 @@ class PipelineOrchestrator:
 
         # Nodes ------------------------------------------------------------
         def load_raw(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'Cleaning', 'running')
             raw_path = os.path.join(self.report_dir, f"{state.file_id}_raw.csv")
             if not os.path.exists(raw_path):
                 raise FileNotFoundError(f"Raw data file {raw_path} not found")
@@ -82,14 +84,28 @@ class PipelineOrchestrator:
             state.cleaned_path = cleaned_path
             state.metadata["cleaning_report"] = cleaning_report
             state.metadata["cleaned_path"] = cleaned_path
+            self.update_step_status(state.job_id, 'Cleaning', 'complete')
             return state
 
         def eda(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'EDA', 'running')
             eda_report = self.eda.perform_eda(state.cleaned_df, state.target_column)
+            # Update target column used
+            target_column = eda_report.get("target_column")
+            if target_column:
+                state.target_column = target_column
+            
+            # Generate EDA plots
+            plot_paths = self.eda.generate_plots(state.cleaned_df, state.target_column, self.report_dir, state.file_id)
+            relative_plot_paths = {k: os.path.basename(path) for k, path in plot_paths.items()}
+            
             state.metadata["eda_report"] = eda_report
+            state.metadata["eda_plots"] = relative_plot_paths
+            self.update_step_status(state.job_id, 'EDA', 'complete')
             return state
 
         def feature_engineering(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'Feature Engineering', 'running')
             engineered_df, fe_report = self.fe.transform(state.cleaned_df, state.target_column)
             engineered_path = os.path.join(self.report_dir, f"{state.file_id}_engineered.csv")
             engineered_df.to_csv(engineered_path, index=False)
@@ -97,17 +113,21 @@ class PipelineOrchestrator:
             state.engineered_path = engineered_path
             state.metadata["feature_engineering_report"] = fe_report
             state.metadata["engineered_path"] = engineered_path
+            self.update_step_status(state.job_id, 'Feature Engineering', 'complete')
             return state
 
         def model_selection(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'Model Selection', 'running')
             model_result = self.model_selector.train_and_evaluate(
                 state.engineered_df, state.target_column, self.report_dir, state.file_id
             )
             state.model_result = model_result
             state.metadata["model_selection"] = model_result
+            self.update_step_status(state.job_id, 'Model Selection', 'complete')
             return state
 
         def tuning(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'Hyperparameter Tuning', 'running')
             problem_type = state.model_result.get("problem_type")
             model_path = os.path.join(self.report_dir, f"{state.file_id}_best_model.joblib")
             tuned_model, best_params, tuning_report = self.tuner.tune_model(
@@ -121,25 +141,37 @@ class PipelineOrchestrator:
             state.best_params = best_params
             state.metadata["tuning_report"] = tuning_report
             state.metadata["best_hyperparameters"] = best_params
+            self.update_step_status(state.job_id, 'Hyperparameter Tuning', 'complete')
             return state
 
         def explainability(state: PipelineState) -> PipelineState:
+            self.update_step_status(state.job_id, 'Explainability', 'running')
+            model_path = os.path.join(self.report_dir, f"{state.file_id}_best_model.joblib")
             explanation_report = self.explainer.generate_explanations(
-                state.tuned_model,
-                state.engineered_df,
-                state.target_column,
-                self.report_dir,
-                state.file_id,
+                df=state.engineered_df,
+                target_column=state.target_column,
+                model_path=model_path,
+                report_dir=self.report_dir,
+                file_id=state.file_id,
             )
             state.metadata["explainability_report"] = explanation_report
+            self.update_step_status(state.job_id, 'Explainability', 'complete')
             return state
 
         def finalize(state: PipelineState) -> PipelineState:
+            # Generate Business Insights
+            from .business_insight_agent import BusinessInsightAgent
+            insight_agent = BusinessInsightAgent()
+            insights_res = insight_agent.generate_insights(state.metadata)
+            insights_list = insights_res.get("insights", [])
+            state.metadata["business_insights"] = insights_list
+
             metadata_path = os.path.join(self.report_dir, f"{state.file_id}_metadata.json")
             with open(metadata_path, "w") as f:
                 json.dump(state.metadata, f, indent=2, default=str)
             state.metadata["metadata_path"] = metadata_path
             return state
+
 
         # Register nodes
         graph.add_node("load", load_raw)
@@ -161,40 +193,100 @@ class PipelineOrchestrator:
         graph.add_edge("explain", "final")
         graph.add_edge("final", END)
 
-        return graph
+        return graph.compile()
+
+    def update_step_status(self, job_id: Optional[str], step_name: str, status: str):
+        if not job_id:
+            return
+        db = SessionLocal()
+        try:
+            run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+            if run:
+                meta = dict(run.meta_json or {})
+                steps = dict(meta.get("steps", {}))
+                steps[step_name] = status
+                meta["steps"] = steps
+                run.meta_json = meta
+                db.add(run)
+                db.commit()
+        except Exception as e:
+            print(f"Error updating step status in DB: {e}")
+        finally:
+            db.close()
 
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
-    def run(self, file_id: str, target_column: Optional[str] = None) -> Dict[str, Any]:
+    def run(self, file_id: str, target_column: Optional[str] = None, job_id: Optional[str] = None) -> Dict[str, Any]:
         """Execute the pipeline for a dataset via the LangGraph state graph.
 
         Returns the consolidated metadata dictionary produced in the ``final`` node.
         """
-        # Start DB session and create a PipelineRun record
+        import uuid
         db = SessionLocal()
         try:
-            pipeline_run = PipelineRun(
-                file_id=file_id,
-                status="running",
-                started_at=datetime.datetime.utcnow()
-            )
-            db.add(pipeline_run)
-            db.commit()
-            db.refresh(pipeline_run)
+            if job_id:
+                pipeline_run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+                if pipeline_run:
+                    pipeline_run.status = "running"
+                    pipeline_run.started_at = datetime.datetime.utcnow()
+                    db.commit()
+                else:
+                    pipeline_run = PipelineRun(
+                        file_id=file_id,
+                        job_id=job_id,
+                        status="running",
+                        started_at=datetime.datetime.utcnow()
+                    )
+                    db.add(pipeline_run)
+                    db.commit()
+                    db.refresh(pipeline_run)
+            else:
+                job_id = str(uuid.uuid4())
+                pipeline_run = PipelineRun(
+                    file_id=file_id,
+                    job_id=job_id,
+                    status="running",
+                    started_at=datetime.datetime.utcnow()
+                )
+                db.add(pipeline_run)
+                db.commit()
+                db.refresh(pipeline_run)
         except Exception as e:
             db.close()
-            raise
+            raise e
+
         # Execute graph
-        init_state = PipelineState(file_id=file_id, target_column=target_column, report_dir=self.report_dir)
-        result_state = self.graph.invoke(init_state)
-        # Update PipelineRun with results
         try:
-            pipeline_run.status = "completed"
-            pipeline_run.finished_at = datetime.datetime.utcnow()
-            pipeline_run.meta_json = result_state.metadata
-            db.add(pipeline_run)
-            db.commit()
+            init_state = PipelineState(
+                file_id=file_id,
+                job_id=job_id,
+                target_column=target_column,
+                report_dir=self.report_dir
+            )
+            result_state = self.graph.invoke(init_state)
+
+            # Query it again within this session to update status
+            pipeline_run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+            if pipeline_run:
+                pipeline_run.status = "completed"
+                pipeline_run.finished_at = datetime.datetime.utcnow()
+                pipeline_run.meta_json = result_state.metadata
+                db.commit()
+            return result_state.metadata
+        except Exception as e:
+            # Mark the run as failed in database
+            try:
+                pipeline_run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+                if pipeline_run:
+                    pipeline_run.status = "failed"
+                    pipeline_run.finished_at = datetime.datetime.utcnow()
+                    meta = dict(pipeline_run.meta_json or {})
+                    meta["error"] = str(e)
+                    pipeline_run.meta_json = meta
+                    db.commit()
+            except Exception as dbe:
+                print(f"Error updating failed pipeline status: {dbe}")
+            raise e
         finally:
             db.close()
-        return result_state.metadata

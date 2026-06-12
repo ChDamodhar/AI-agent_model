@@ -60,6 +60,9 @@ class ExplainabilityAgent:
         # Prepare data
         X = df.drop(columns=[target_column])
         
+        # Downsample features for SHAP to a representative subset to optimize execution speed
+        X_shap = X.sample(min(300, len(X)), random_state=42)
+        
         model_name = model.__class__.__name__
         
         # Select appropriate SHAP Explainer
@@ -69,8 +72,8 @@ class ExplainabilityAgent:
         # Linear models
         if hasattr(model, "coef_") and not model_name.startswith("RandomForest"):
             try:
-                explainer = shap.LinearExplainer(model, X)
-                shap_values = explainer(X)
+                explainer = shap.LinearExplainer(model, X_shap)
+                shap_values = explainer(X_shap)
             except Exception:
                 pass
                 
@@ -78,25 +81,25 @@ class ExplainabilityAgent:
         if shap_values is None:
             try:
                 explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X)
+                shap_values = explainer.shap_values(X_shap)
             except Exception:
                 try:
-                    explainer = shap.Explainer(model, X)
-                    shap_values = explainer(X)
+                    explainer = shap.Explainer(model, X_shap)
+                    shap_values = explainer(X_shap)
                 except Exception:
                     # Fallback to KernelExplainer with limited background
-                    background = X.sample(min(50, len(X)), random_state=42)
+                    background = X_shap.sample(min(50, len(X_shap)), random_state=42)
                     explainer = shap.KernelExplainer(model.predict, background)
-                    shap_values = explainer.shap_values(X)
+                    shap_values = explainer.shap_values(X_shap)
 
         # Parse SHAP values matrix
         shap_matrix = self._get_shap_matrix(shap_values)
         
-        # Calculate feature importance
+         # Calculate feature importance
         mean_abs_shap = np.mean(np.abs(shap_matrix), axis=0)
         
         feature_importance = []
-        for col, imp in zip(X.columns, mean_abs_shap):
+        for col, imp in zip(X_shap.columns, mean_abs_shap):
             feature_importance.append({
                 "feature": col,
                 "importance": float(imp)
@@ -111,9 +114,9 @@ class ExplainabilityAgent:
         plt.figure(figsize=(10, 6))
         # shap.summary_plot can accept Explanation objects or raw values + data
         if hasattr(shap_values, "values"):
-            shap.summary_plot(shap_values, X, show=False)
+            shap.summary_plot(shap_values, X_shap, show=False)
         else:
-            shap.summary_plot(shap_matrix, X, show=False)
+            shap.summary_plot(shap_matrix, X_shap, show=False)
             
         plt.tight_layout()
         plt.savefig(plot_path, dpi=150)

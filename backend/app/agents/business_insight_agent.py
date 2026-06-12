@@ -9,57 +9,17 @@ class BusinessInsightAgent:
 
     def _call_llm(self, prompt: str) -> str:
         """
-        Attempts to call available LLMs: Gemini, OpenAI, or local Ollama.
-        Returns empty string if all fail or are unavailable.
+        Calls local Ollama with the phi-2 model using LangChain.
+        Returns empty string if the call fails or is unavailable.
         """
-        # 1. Try Gemini API
-        gemini_key = os.environ.get("GEMINI_API_KEY")
-        if gemini_key:
-            try:
-                url = f"https://generativelink.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-                headers = {"Content-Type": "application/json"}
-                data = {"contents": [{"parts": [{"text": prompt}]}]}
-                req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    res = json.loads(response.read().decode("utf-8"))
-                    return res["candidates"][0]["content"]["parts"][0]["text"]
-            except Exception:
-                pass
-
-        # OpenAI API block removed; Gemini is now the primary LLM
-        # openai_key = os.environ.get("OPENAI_API_KEY")
-        # if openai_key:
-        #     try:
-        #         url = "https://api.openai.com/v1/chat/completions"
-        #         headers = {
-        #             "Content-Type": "application/json",
-        #             "Authorization": f"Bearer {openai_key}"
-        #         }
-        #         data = {
-        #             "model": "gpt-4o-mini",
-        #             "messages": [{"role": "user", "content": prompt}],
-        #             "temperature": 0.3
-        #         }
-        #         req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
-        #         with urllib.request.urlopen(req, timeout=10) as response:
-        #             res = json.loads(response.read().decode("utf-8"))
-        #             return res["choices"][0]["message"]["content"]
-        #     except Exception:
-        #         pass
-
-        # 3. Try local Ollama
         try:
-            url = "http://localhost:11434/api/generate"
-            headers = {"Content-Type": "application/json"}
-            data = {
-                "model": "gemma",  # Or llama3
-                "prompt": prompt,
-                "stream": False
-            }
-            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=5) as response:
-                res = json.loads(response.read().decode("utf-8"))
-                return res["response"]
+            from langchain_ollama import OllamaLLM
+            llm = OllamaLLM(
+                model="phi-2",
+                base_url="http://localhost:11434",
+                timeout=10
+            )
+            return llm.invoke(prompt)
         except Exception:
             pass
 
